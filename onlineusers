@@ -1,0 +1,26 @@
+#Author: Manohar Dharmala
+#Purpose: Get online-users count based on timestamp
+#Created On:28-01-2020
+
+import re
+from datetime import datetime
+time_format = '%Y-%m-%dT%H:%M'     #actual logsfile timestamp
+starttime = str(raw_input("enter start time (yyyy-m-dTH:M) : "))    
+convert_starttime = datetime.strptime(starttime, time_format) #converting timestamps as per logs
+endtime = str(raw_input("enter end time (yyyy-m-dTH:M) : "))
+convert_endtime = datetime.strptime(endtime, time_format)
+firstfilename = str(raw_input("enter first file name only and no need of full file path:"))
+secondfilename = str(raw_input("enter second file name only and no need of full file path:"))
+thirdfilename = str(raw_input("enter third file name only and no need of full file path:"))
+files = [firstfilename,secondfilename,thirdfilename]
+for logfile in files:   #created for loop to get all log files 
+	path = "/opt/jabber/xcp/var/log/%s"%(logfile)  #created path for log files location
+	print(path)
+ 	with open(path,'r') as file:  #we need to open as log files and cannot open directory
+    		for line in file:
+        		timestamp = re.findall("'(\d{4}-\d{2}-\d{2}T\d*:\d*)",line)[0]  #getting first index of file
+        		#timestamp_epoch = int(time.mktime(time.strptime(timestamp,time_format)))
+        		convert_timestamp = datetime.strptime(timestamp,time_format)
+        		onlineuser = re.findall("<online.*>(\d+)</online.*>",line)
+        		if onlineuser and convert_timestamp >= convert_starttime and convert_timestamp <= convert_endtime:  #onlineusers and convert time should match with specifiled timestamps
+           			 print("Timestamp:%s and Online users: %s"%(timestamp, onlineuser[0]))
