@@ -1,0 +1,112 @@
+####################Author:Manohar Dharamala##########################
+####################Created on:04/26/2018#############################
+####################Updated on:07/11/18#############################
+####################Purose:Script maninly used for get the notfication Messenger schduled changes##############
+import requests
+import datetime
+import urllib
+import json
+import pytz
+import os
+from pytz import timezone
+from datetime import datetime
+import ConfigurationModule
+from ConfigurationModule import ConfigParser
+
+# Requirements of the script as below
+# https://developer.webex.com/endpoint-messages-post.html  . this is spark api wiki. FYI
+#ConfigurationModule.loadconfig()
+#spark_room_id = ConfigurationModule.getid("Messenger","spark_room_id")
+#spark_room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vYzBlODAwYjAtZjhkNS0xMWU0LTk1NTEtZjU4NzI3YmU2YWNh"
+spark_authorization = "Bearer ZDNhMDU2NDctMzNjNS00YjBlLTgwM2ItNTA1Y2Y0MjJiMmFhMGM3ZmNkMGEtMTAz"
+
+def generate_query_condition_for_changedashboard():
+    date_format='%m/%d/%Y %H:%M:%S %Z'
+    date = datetime.now(tz=pytz.utc)
+    date = date.astimezone(timezone('US/Pacific'))
+    startdate = str(date.year)+"-"+str(date.month)+"-"+str(date.day)+" 00:00:01"
+    enddate = str(date.year)+"-"+str(date.month)+"-"+str(date.day)+" 23:59:59"
+    parameters = {"startDate": startdate, "endDate": enddate}
+    encoded_parameters = urllib.urlencode(parameters)
+    return encoded_parameters
+
+
+def get_wcr_from_changedashboard(impgroup_name, spark_room_id):
+    format = generate_query_condition_for_changedashboard()
+    url = "http://sdp.webex.com/changedashboard/api/v1/cr/detailinfo"
+    headers = {'Authorization': 'Basic Q2hhbmdlX0Rhc2hib2FyZF9rZXk6OTM3ZTVhOTRmYTcyNGJiMmIxODMxZDAzNjQ1NTY0Yzk='}
+    date_format='%m/%d/%Y %H:%M:%S %Z'
+    date = datetime.now(tz=pytz.utc)
+    date = date.astimezone(timezone('US/Pacific'))
+    startdate = str(date.year)+"-"+str(date.month)+"-"+str(date.day)+" 00:00:01"
+    enddate = str(date.year)+"-"+str(date.month)+"-"+str(date.day)+" 23:59:59"
+    parameters = {"startDate": startdate, "endDate": enddate}
+    encoded_parameters = urllib.urlencode(parameters)
+    #paramstring = {"startDate":"startdate","endDate":"enddate"}
+    response = requests.request("GET", url, headers=headers, params=parameters)
+    jdata = json.loads(response.text)
+
+    actual_data = jdata["data"]
+    #print(type(act_data))
+
+    """for data in act_data :
+        print(data)
+        print("============================================ \n \n \n \n")
+        print(data["changeRefId"], data["serviceName"])"""
+
+    spark_message, i = "", 1
+    for data in actual_data:
+            #if data["impgroup"]=="Messenger Operations" and data["status"]!= "Draft" and data["status"]!= "Completed":
+            if data["implementerGroup"]==impgroup_name and data["stateCDDisp"]!= "Draft" and data["stateCDDisp"]!= "Completed":
+                    title = "<b>[Change %s]===<b><br/>" % i
+                    spark_child_dict = title + "<b>WCR Number</b>: %s<br/>" \
+                                       "<b>Status</b>: %s<br/>" \
+                                       "<b>Subject&nbsp;&nbsp;&nbsp;</b>: %s<br/>" \
+                                       "<b>Start Time</b>: %s<br/><br/>" %(data["changeId"],
+                                                                       data["stateCDDisp"],
+                                                                       data["summary"],
+                                                                       data["schStartDate"])
+                    spark_message += spark_child_dict
+                    i += 1
+    print "Change Record :", spark_message
+    send_message_to_spark(spark_message, spark_room_id)
+    return spark_message
+
+def send_message_to_spark(message_info, spark_room_id):
+    spark_api = "https://api.ciscospark.com/v1/messages"
+    headers = {
+            'authorization': spark_authorization,
+            'content-type': "application/json"
+
+    }
+
+    print "Spark Id from Config file:", spark_room_id
+
+    payload = {"roomId": spark_room_id}
+    payload["markdown"] = "**No scheduled chages today**" if message_info == "" else message_info
+    response = requests.post(spark_api,data=json.dumps(payload, ensure_ascii=False),headers=headers,verify=False)
+    if response.status_code == 200:
+        print "execute successful."
+    else:
+        raise Exception(response.content)
+
+
+def getconfigfiles():
+    i = 0
+    for filename in os.listdir("."):
+        if filename.endswith(".ini"):
+            print "Folder file : ", filename
+            ConfigurationModule.loadconfig(filename)
+            sections = ConfigurationModule.getsections()
+            print "Sections :", sections
+            impgroup_name = ConfigurationModule.getkeyvalue(sections[i],"impgroup")
+            spark_room_id = ConfigurationModule.getkeyvalue(sections[i],"spark_room_id")
+            print "Impgroupname : " , impgroup_name, " section : ", sections[i]
+            get_wcr_from_changedashboard(impgroup_name, spark_room_id)
+            i = i + 1
+
+# execute this sripts , send msg to spark room
+if __name__ == "__main__":
+    getconfigfiles()
+    #wcr_message = get_wcr_from_changedashboard()
+    #send_message_to_spark(wcr_message)
