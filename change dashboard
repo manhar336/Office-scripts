@@ -18,7 +18,7 @@ from ConfigurationModule import ConfigParser
 #ConfigurationModule.loadconfig()
 #spark_room_id = ConfigurationModule.getid("Messenger","spark_room_id")
 #spark_room_id = "Y2lzY29zcGFyazovL3VzL1JPT00vYzBlODAwYjAtZjhkNS0xMWU0LTk1NTEtZjU4NzI3YmU2YWNh"
-spark_authorization = "Bearer ZDNhMDU2NDctMzNjNS00YjBlLTgwM2ItNTA1Y2Y0MjJiMmFhMGM3ZmNkMGEtMTAz"
+spark_authorization = "Bearer ZDNhMDU2NDctMzNjNS00YjBlLTgwM2ItNTA1Y"
 
 def generate_query_condition_for_changedashboard():
     date_format='%m/%d/%Y %H:%M:%S %Z'
