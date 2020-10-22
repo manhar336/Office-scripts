@@ -1,0 +1,67 @@
+"""
+Created on 2015-1-14
+@author: kutao
+"""
+import requests
+from fabric.colors import green
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+# global api_auth
+
+class RestCall:
+    """to call restful API"""
+
+    def __init__(self, base_url, header):
+        self.base_url = base_url
+        self.header = header
+
+    def get(self, resource):
+        return self.__request(resource, 'get')
+
+    def put(self, resource, put_data):
+        return self.__request(resource, 'put', put_data)
+
+    def post(self, resource, post_data):
+        return self.__request(resource, 'post', post_data)
+
+    def delete(self, resource, delete_data):
+        return self.__request(resource, 'delete', delete_data)
+
+    def __request(self, resource, req_type, data=None):
+        try:
+            print (green("__https : run '%s' on resource: '%s'" % (req_type, resource)))
+            if req_type == 'get':
+                response = requests.get(self.base_url + resource,
+                                        headers=self.header, verify=False)
+            elif req_type == 'put':
+                response = requests.put(self.base_url + resource, data=data,
+                                        headers=self.header, verify=False)
+            elif req_type == 'post':
+                response = requests.post(self.base_url + resource, data=data,
+                                         headers=self.header, verify=False)
+            elif req_type == 'delete':
+                response = requests.delete(self.base_url + resource, data=data,
+                                           headers=self.header, verify=False)
+
+            else:
+                print ("no correct request type found")
+                return
+            response.raise_for_status()
+
+        # deal with exceptions by accessing the returned json and printing out why
+        except requests.exceptions.HTTPError as e:
+            print e.response.status_code
+            print e.response.json()
+            return
+        return response
+
+
+def _main():
+    pass
+
+
+if __name__ == '__main__':
+    _main()
