@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+from fabric.api import *
+from fabric.colors import *
+
+def gs_verifications_check():
+    print red("checking  wbxd service status")
+    sudo('ps -ef|grep -i wbx')
+    print green("checking cache status")
+    sudo("/opt/webex/mon/bin/checkshm EIMGS|grep -i cache|awk {'print $2'}")
+    print magenta("checking  handlecheck and selfcheck status")
+    sudo("egrep -i 'handleWhereCheck|selfcheck' /opt/webex/tricon/logs/*|head -15")
+    print cyan("checking internal server failback status")
+    sudo("grep -i 'checkWhere() failback happened' /opt/webex/tricon/logs/*")
+    print yellow("checking warnings and errors in application logs")
+    sudo ('su cnct-tricon -s "/bin/sh" -c " egrep -i warning\|error /opt/webex/tricon/logs/* |grep -i readHeader"')
+    print blue("checking EIMGS information in logs")
+    sudo('grep -i EIMGS /opt/webex/mon/log/*|head -15')
+    print green("checking DB status")
+    sudo('egrep -i "checkDBStaus|getdbstatus" /opt/webex/tricon/logs/* |head -15')
+    print magenta("checking handleself check ")
+    sudo('grep -A 6 handleSelfCheck /opt/webex/tricon/logs/* |grep -i "NONONO"')
+    print green("checking connections")
+    sudo("netstat -n |awk '/^tcp/ {++S[$NF]} END {for (a in S) print a,S[a]}'")
+
+
+def system_level_check():
+    print blue("checking system memory")
+    sudo('free -m')
+
+def verify():
+    execute(gs_verifications_check)
+    execute(system_level_check)
