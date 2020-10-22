@@ -1,0 +1,674 @@
+import re
+import json
+import requests
+from operator import itemgetter
+from copy import deepcopy
+
+app = 'app'
+token = '7aac4c8c-7c0a-401f-ad19-cf82ddb729a5'
+auth = (app, token)
+
+_API_BASE_URL = "https://mavapi.webex.com"
+_HEADERS = {"Accept": "application/json"}
+
+_COLORS = [
+    u'#0000ff',    # blue
+    u'#9900ff',    # purple
+    u'#ff00ff',    # pink
+    u'#ff0000',    # red
+    u'#ff9900',    # orange
+    u'#ffff00',    # yellow
+    u'#33cc33',    # green
+    u'#00ccff',    # cyan
+]
+
+def _pick_color(idx):
+    """Selected from global list _COLORS of color hex strings
+
+    :param idx: index, meant to be incremented each call
+    :return: a color hex string
+    """
+    return _COLORS[idx%len(_COLORS)]
+
+def _incrementCompositeLetterId(l=''):
+    """Increments letter id for datapoints in a chart featuring composites
+
+    .. note:: Datapoints in a composite-based graph have letter ids, incremented as follows:
+                A, B, C, ..., Z, AA, AB, AC, ..., AZ, BA, BB, BC, ..., ZZ, AAA, AAB, AAC, ...
+
+    :param l: letter id
+
+    :return: letter id incremented by one
+    :rtype: string
+    """
+    if len(l) == 0:
+        return 'A'
+    elif l[len(l)-1] != 'Z':
+        c = l[len(l)-1]
+        l = l[:-1]
+        l += chr(ord(c)+1)
+        return l
+    return _incrementCompositeLetterId(l[:-1]) + 'A'
+
+def _get(route):
+    """Makes a get request to mav
+
+    :param route: string that is appended to the end of the api base url
+
+    :return: JSON response from mav
+    :rtype: list or dict
+
+    """
+    try:
+        response = requests.get(
+            _API_BASE_URL + route,
+            auth=auth,
+            headers=_HEADERS
+        )
+        response.raise_for_status()
+        return_data = response.json()
+        # Make sure all data is fetched for paginated results
+        while 'X-Circonus-More-Items' in response.headers and response.headers['X-Circonus-More-Items'] == 'true':
+            print 'Pagination detected, querying for next page...'
+            if 'size=' in route:
+                size_arg = re.search('.*(size=\d+).*', route).group(1)
+                page_size = size_arg.split('size=')[1]
+            else:
+                page_size = '20'
+            if 'from=' in route:
+                from_arg = re.search('.*(from=\d+).*', route).group(1)
+                index = from_arg.split('from=')[1]
+            else:
+                from_arg = 'from=0'
+                route = route + '&from=0'
+                index = '0'
+            index = str( int(index) + int(page_size) )
+            route = route.replace(from_arg, 'from=' + index)
+            response = requests.get(
+                _API_BASE_URL + route,
+                auth=auth,
+                headers=_HEADERS
+            )
+            response.raise_for_status()
+            return_data += response.json()
+        return return_data
+
+    except requests.exceptions.HTTPError as e:
+        print "%s: %s (%s)" % (
+            e.response.status_code,
+            e.response.json()['code'],
+            e.response.json()['message']
+        )
+
+def _post(route, body):
+    """Makes a post request to mav
+
+    :param route: string that is appended to the end of the api base url
+    :param body: Body of http request
+
+    :return: JSON response from mav
+    :rtype: list or dict
+    """
+    try:
+        response = requests.post(
+            _API_BASE_URL + route,
+            json.dumps(body),
+            auth=auth,
+            headers=_HEADERS
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except requests.exceptions.HTTPError as e:
+        print "%s: %s (%s)" % (
+            e.response.status_code,
+            e.response.json()['code'],
+            e.response.json()['message']
+        )
+
+def _getHostFromDisplayName(display_name):
+    """Extracts host name from a check bundle display name. Update this method if new naming conventions are created
+
+    :param display_name: 'display_name' field of a check bundle definition (string)
+
+    :return: String host name
+    :rtype: string
+    """
+    match = re.match('.* / (.*)', display_name)
+    if match:
+        hostname = match.group(1)
+    else:
+         hostname = display_name
+    return hostname
+
+def _groupByPool(bundles, regex):
+    """Organizes an array of check bundles into a dictionary indexed by pool
+
+    :param bundles: array of check bundle definitions
+    :param regex: regular expression used to determine pool id. Example:
+                    'jsj7tc101' with regex '(\D\D\D\d+)tc(\d)\d\d' makes pool id 'jsj7'
+
+    :return: Dictionary of check names indexed by pool name
+    :rtype: dict
+    """
+    pools_array = []
+    hosts_array = []
+    host_mappings = {}
+    bundle_mappings = {}
+    compound_pool_name = False
+    one_match_group = False
+    for bundle in bundles:
+        hostname = bundle['display_name'].split('/')[-1].strip()
+        bundle_mappings[hostname] = bundle
+        hosts_array.append(hostname)
+        try:
+            match = re.match(regex, hostname)
+            if match:
+                try:
+                    pool = match.group(1)
+                    if match.group(2):
+                        if one_match_group == False:
+                            compound_pool_name = True
+                            pool = '%s.%s' % (match.group(1), match.group(2))
+                except IndexError as e:
+                    one_match_group = True
+            else:
+                raise ValueError('invalid hostname: %s' % hostname)
+            pools_array.append(pool)
+        except ValueError as e:
+            print e
+            continue
+    bundles = {}  # will re-populate later
+    # Map hosts to pool ids
+    pool_ids = set(pools_array)
+    host_ids = set(hosts_array)
+    for pool_id in pool_ids:
+        host_mappings[pool_id] = []
+        for host_id in host_ids:
+            match_found = False
+            # Matching mechanism depends on whether it is a compound pool name or not
+            if compound_pool_name:
+                match = re.match('(.+)\.(\d+)', pool_id)
+                if match:
+                    prefix = match.group(1)
+                    postfix = match.group(2)
+                else:
+                    raise ValueError('invalid poolname constructed: %s' % pool_id)
+                # If prefix is not even in the host_id, can assume there is no match
+                if prefix in host_id:
+                    # First need to extract service id to check for pool match
+                    expression = prefix + '(\D+)\d+'
+                    match = re.match(expression, host_id)
+                    if match and prefix + match.group(1) + postfix == host_id[:-2]:
+                        match_found = True
+            else:
+                if pool_id in host_id:
+                    # First need to extract service id to check for pool match
+                    chars = list(regex)
+                    i = 0
+                    to_replace = ''
+                    for char in chars:
+                        if char == '(':
+                            end = char
+                            j = i
+                            while end != ')':
+                                if j >= len(chars):
+                                    raise ValueError('Missing closing ) in regex argument')
+                                    exit()
+                                to_replace += end
+                                j += 1
+                                end =chars[j]
+                            to_replace += ')'
+                            break
+                        i += 1
+                    expression = regex.replace(to_replace, pool_id)
+                    match = re.match(expression, host_id)
+                    if match:
+                        match_found = True
+            if match_found == True:
+                host_mappings[pool_id].append(host_id)
+    # Re-construct bundles list as nested array of lists
+    for pool, host_list in host_mappings.iteritems():
+        bundles[pool] = []
+        for hname in host_list:
+            bundles[pool].append(bundle_mappings[hname])
+        bundles[pool].sort(key=itemgetter('display_name'))
+    return bundles
+
+def _formatCheckBundles(bundles, content='definitions', groupBy=None):
+    """Helper method to format check bundles for getChecksByTag and getChecksByQuery
+
+    :param bundles: array of check bundle definitions
+    :param content: string either 'definitions', 'check_ids', 'check_bundle_ids', or 'display_names', specifying what gets returned
+    :param groupBy: Optional regex that extracts pool id from display_name to group checks by pool. Example:
+                    'jsj7tc101' with regex '(\D\D\D\d+)tc(\d)\d\d' makes pool id 'jsj7'
+
+    :return: Formatted dictionary of check names
+    ":rtype: dict
+    """
+    # Sort by pool if regex provided
+    if groupBy:
+        bundles = _groupByPool(bundles, groupBy)
+    # Return value based on content parameter
+    if content == 'definitions':
+        return bundles
+    elif content == 'check_ids':
+        if groupBy:
+            check_ids = {}
+            for pname, list in bundles.iteritems():
+                check_ids[pname] = []
+                for bundle in list:
+                    check_ids[pname].append(int(bundle['_checks'][0][7:]))
+        else:
+            check_ids = []
+            for bundle in bundles:
+                check_ids.append(int(bundle['_checks'][0][7:]))
+        return check_ids
+    elif content == 'check_bundle_ids':
+        if groupBy:
+            check_ids = {}
+            for pname, list in bundles.iteritems():
+                check_ids[pname] = []
+                for bundle in list:
+                    check_ids[pname].append(int(bundle['_cid'][14:]))
+        else:
+            check_ids = []
+            for bundle in bundles:
+                check_ids.append(int(bundle['_cid'][14:]))
+        return check_ids
+    elif content == 'display_names':
+        if groupBy:
+            display_names = {}
+            for pname, list in bundles.iteritems():
+                display_names[pname] = []
+                for bundle in list:
+                    display_names[pname].append(bundle['display_name'])
+        else:
+            display_names = []
+            for bundle in bundles:
+                display_names.append(bundle['display_name'])
+        return display_names
+    else:
+        raise ValueError('"content" argument expects "definitions", "display_names", or "check_ids"')
+
+
+def getChecksByTag(tags, collector_type='collectd', content='definitions', groupBy=None, save_to_file=None):
+    """Fetches all checks containing the specified tags.
+        Can be called in a loop to append together intersecting sets
+
+    :param tags: array of tags identifying checks (strings)
+    :param collector_type: string that identifies collector (either 'collectd', 'httptrap', or 'composite')
+    :param content: string either 'definitions', 'check_ids', 'check_bundle_ids', or 'display_names', specifying what gets returned
+    :param groupBy: Optional regex that extracts pool id from display_name to group checks by pool. Example:
+                    'jsj7tc101' with regex '(\D\D\D\d+)tc(\d)\d\d' makes pool id 'jsj7'
+    :param save_to_file: string filename where data will be written. Must be either .p or .json file
+
+    :return: List of checks, or dictionary of lists of checks indexed by pool
+    :rtype: list
+
+    .. seealso:: https://mav.webex.com/resources/api/calls/check
+                    https://mav.webex.com/resources/api/calls/check_bundle
+    """
+    checks = _get('/check_bundle?search=(tags%3A' + ','.join(tags) + ')&size=1000&from=0&order=display_name')
+    bundles = []
+    # Filter bundles by type
+    for bundle in checks:
+        if bundle['type'] == collector_type:
+            bundles.append(bundle)
+    # filter bundles by tags
+    if len(tags) > 1:
+        for tag in tags[1:]:
+            old_bundles = bundles
+            bundles = []
+            for bundle in old_bundles:
+                if tag in bundle['tags']:
+                    bundles.append(bundle)
+    data = _formatCheckBundles(bundles, content, groupBy)
+    return data
+
+def createGraphsWithMetricClusters(graph_obj, clusters, pools, cluster_args={}):
+    """Creates metric clusters and graphs which display their data
+
+    :param graph_obj: dictionary which defines the graph
+                        follows format specified by mav api, except for title
+                        this should be a formatted string which fills in unique pool name for each chart
+                        Title Example- '(V2) J2EEAPP / <pool_name> / Average Requests'
+    :param clusters: list of dictionaries which define clusters in the graph...
+                        follows format specified by mav api, except for 'name' field and 'query' field in the list in the 'queries' field
+                        'name' should have '<pool_id>' in the string where unique pool name will be replaced for each cluster name
+                        'queries' should be a formatted string used to populate pool data to construct unique query for each cluster
+                        (see query example below)
+                        usually just one query is needed, but metric clusters can have more than one query if desired
+                        Query Example: [ {
+                            'query': '(check_name:j2eeapp / <pool>tc<sub>*) (metric_name:interface`eth0`if_octets`rx)',
+                            'type': 'counter'
+                        } ]
+    :param pools: list of pool names which will be used both in graph title and metric cluster queries
+    :param cluster_args: Dict allowing user to override 'axis', 'data_formula', 'stack', 'legend_formula', etc
+
+    :return: List of json responses from mav
+    :rtype: list
+
+    .. seealso:: https://mav.webex.com/resources/api/calls/graph
+                    https://mav.webex.com/resources/api/calls/metric_cluster
+    """
+    responses = []
+    for pool in pools:
+        graph = graph_obj.copy()
+        # Extract pool name index
+        if "." in pool:
+            items = pool.split(".")
+            poolname = items[0]
+            sub = items[1]
+        else:
+            poolname = pool
+            sub = ''
+        # Create metric clusters
+        cluster_list = []
+        it = 0
+        for c in clusters[:]:
+            cluster = {'description': '', 'name': c['name'], 'queries': []}
+            for query in c['queries']:
+                cluster['queries'].append({
+                    'query': query['query'].replace('<pool>', poolname).replace('<sub>', sub).replace('<pool_id>', pool),
+                    'type': query['type']
+                })
+            cluster['name'] = cluster['name'].replace('<pool_id>', pool)
+            response = _post('/metric_cluster', cluster)
+            # Construct cluster graph obj
+            to_append = cluster_args.copy()
+            if 'axis' not in to_append:
+                to_append['axis'] = 'l'
+            if 'data_formula' not in to_append:
+                to_append['data_formula'] = None
+            if 'hidden' not in to_append:
+                to_append['hidden'] = False
+            if 'legend_formula' not in to_append:
+                to_append['legend_formula'] = None
+            if 'stack' not in to_append:
+                to_append['stack'] = None
+
+            to_append['metric_cluster'] = response['_cid']
+            to_append['name'] = response['name']
+            to_append['color'] = _pick_color(it)
+            it += 1
+            cluster_list.append(to_append)
+        graph['metric_clusters'] = cluster_list
+        if '<pool_name>' not in graph['title']:
+            raise ValueError('createGraphsWithMetricClusters expects <pool_name> in title string')
+        graph['title'] = graph['title'].replace('<pool_name>', pool.upper())
+        if 'style' not in graph:
+            graph['style'] = 'line'
+        response = _post('/graph', graph)
+        responses.append(response)
+    return responses
+
+def createGraphsWithComposites(graph_obj, check_bundles):
+    """Creates charts that feature composite formulas. Requires use of raw datapoints, not metric clusters
+        Generates one chart for each check, or nested list of checks, specified in check_ids array
+        If multiple checks and/or datapoints per chart, datapoints will be added in the following order:
+        (check1, datapoint1), (check1, datapoint2), (check2, datapoint1), (check2, datapoint2), (check3, datapoint1), etc.
+
+    :param graph_obj: dictionary which defines the graph
+                        follows format specified by mav api, except for title
+                        this should be a formatted string which fills in unique pool name for each chart
+                        Title Example: '(V2) J2EEAPP / <pool_name> / Average Requests'
+                        use either 'pool_name' or 'host_name' inside the < > to specify what info to put in that place
+                        if 'pool_name', check_bundles must be a dictionary of lists of host names indexed by pool name
+                        only need to provide one of each type of datapoint in graph_obj
+                        one of each datapoint will be created for each check in the list
+                        composites list can just have one of each type of composite, will duplicate for all checks in pool if needed
+    :param check_bundles: array containing check bundle definitions, or dictionary of lists of them indexed by pool name
+                            if nested list of check bundles, graph will combine each set into one chart
+                            entire definitions are required, not just check_id's or display names alone
+
+    :return: List of json responses from mav
+    :rtype: list
+
+    .. seealso:: https://mav.webex.com/resources/api/calls/graph
+                    https://mav.webex.com/resources/api/calls/check
+    """
+    responses = []
+    for datapoint in graph_obj['datapoints']:
+        if 'check_id' in datapoint:
+            del datapoint['check_id']
+    # Group checks together if nested list
+    if isinstance(check_bundles, dict):
+        comps_added_so_far = 0
+        for poolname, hosts in check_bundles.iteritems():
+            color_idx = 0
+            graph = deepcopy(graph_obj)
+            template_dpoints = graph['datapoints'][:]
+            template_composites = graph['composites'][:]
+            dpoints = []
+            composites = []
+            current_composites = template_composites[:]
+            first_time = True
+            for bundle in hosts:
+                hostname = _getHostFromDisplayName(bundle['display_name'])
+                check_id = int(bundle['_checks'][0][7:])
+                # Append a datapoint for each template for this check
+                for dpoint in template_dpoints:
+                    to_append = dpoint.copy()
+                    to_append['color'] = '#0000ff'
+                    to_append['check_id'] = check_id
+                    to_append['name'] = hostname + ': ' + dpoint['metric_name']
+                    dpoints.append(to_append)
+                # Do the same for composites
+                if not first_time:
+                    i = 0
+                    for comp in current_composites:
+                        formula = comp['data_formula']
+                        new_formula = ''
+                        # For this check, increment the composite formula for this set of datapoints
+                        chars = list(formula)
+                        num_datapoints = len(template_dpoints)
+                        j = 0
+                        current_str = ''
+                        for char in chars:
+                            if char.isalpha():
+                                current_str += char
+                                for _ in range(num_datapoints):
+                                    chars[j] = _incrementCompositeLetterId(chars[j])
+                            # If not a letter...
+                            else:
+                                if current_str:
+                                    to_append = current_str
+                                    for _ in range(num_datapoints):
+                                        to_append = _incrementCompositeLetterId(to_append)
+                                    new_formula += to_append
+                                    current_str = ''
+                                new_formula += char
+                        # Need to append last letter(s)
+                        if current_str:
+                            to_append = current_str
+                            for _ in range(num_datapoints):
+                                to_append = _incrementCompositeLetterId(to_append)
+                            new_formula += to_append
+                            current_str = ''
+                            j += 1
+                        new_comp = deepcopy(current_composites[i])
+                        new_comp['data_formula'] = new_formula
+                        new_comp['color'] = _pick_color(color_idx)
+                        new_comp['name'] = hostname + ': ' + template_composites[i]['name']
+                        composites.append(new_comp)
+                        current_composites[i] = new_comp
+                        color_idx += 1
+                        i += 1
+                else:
+                    first_time = False
+                    for comp in current_composites:
+                        new_comp = deepcopy(comp)
+                        new_comp['color'] = _pick_color(color_idx)
+                        new_comp['name'] = hostname + ': ' + comp['name']
+                        composites.append(new_comp)
+                        color_idx += 1
+            graph['datapoints'] = dpoints
+            graph['composites'] = composites
+            # Using '<host_name> would be improper use'
+            if '<host_name>' in graph['title'] or '<pool_name>' not in graph['title']:
+                raise ValueError('createGraphsWithComposites only expects <pool_name> in title string')
+                exit()
+            graph['title'] = graph['title'].replace('<pool_name>', poolname.upper())
+            if 'style' not in graph:
+                graph['style'] = 'line'
+            response = _post('/graph', graph)
+            responses.append(response)
+    # Else one check per chart
+    else:
+        for bundle in check_bundles:
+            color_idx = 0
+            graph = graph_obj.copy()
+            template_dpoints = graph['datapoints'][:]
+            template_composites = graph['composites'][:]
+            dpoints = []
+            composites = []
+            hostname = _getHostFromDisplayName(bundle['display_name'])
+            check_id = int(bundle['_checks'][0][7:])
+            # Append a datapoint for each template for this check
+            for dpoint in template_dpoints:
+                to_append = dpoint.copy()
+                to_append['color'] = '#0000ff'
+                to_append['check_id'] = check_id
+                to_append['name'] = hostname + ': ' + dpoint['name']
+                dpoints.append(to_append)
+            # Do the same for composites
+            for comp in template_composites:
+                to_append = comp.copy()
+                to_append['color'] = _pick_color(color_idx)
+                to_append['name'] = hostname + ': ' + comp['name']
+                color_idx += 1
+                composites.append(to_append)
+            graph['datapoints'] = dpoints
+            graph['composites'] = composites
+            # Using '<pool_name> would be improper use'
+            if '<pool_name>' in graph['title'] or '<host_name>' not in graph['title']:
+                raise ValueError('createGraphsWithComposites only expects <host_name> in title string')
+                exit()
+            graph['title'] = graph['title'].replace('<host_name>', hostname)
+            if 'style' not in graph:
+                graph['style'] = 'line'
+            response = _post('/graph', graph)
+            responses.append(response)
+    return responses
+
+print 'Running..'
+
+cpu_obj = {
+    "style": "line",
+    "composites": [{
+        "data_formula": "=100*(C-B-A)/C",
+        "name": "",
+        "color": "#0000ff",
+        "legend_formula": None,
+        "hidden": False,
+        "stack": None,
+        "axis": "l"
+    }],
+    "title": "ADMDSVR / <pool_name> / CPU %",
+    "datapoints": [{
+        "data_formula": None,
+        "metric_name": "aggregation`cpu-sum`cpu`wait",
+        "color": "#0000ff",
+        "legend_formula": None,
+        "derive": "counter",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }, {
+        "data_formula": None,
+        "metric_name": "aggregation`cpu-sum`cpu`idle",
+        "color": "#9900ff",
+        "legend_formula": None,
+        "derive": "counter",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }, {
+        "data_formula": None,
+        "metric_name": "aggregation`cpu-sum`cpu",
+        "color": "#9900ff",
+        "legend_formula": None,
+        "derive": "counter",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }],
+    "line_style": "stepped",
+    "guides": []
+}
+
+memory_obj = {
+    "composites": [{
+        "data_formula": "=100*A/(A+B+C+D)",
+        "name": "% Memory Used",
+        "legend_formula": None,
+        "hidden": False,
+        "stack": None,
+        "axis": "l"
+    }],
+    "title": "ADMDSVR / <pool_name> / Memory %",
+    "style": "line",
+    "datapoints": [{
+        "data_formula": None,
+        "metric_name": "memory`memory`used",
+        "legend_formula": None,
+        "derive": "gauge",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }, {
+        "data_formula": None,
+        "metric_name": "memory`memory`free",
+        "legend_formula": None,
+        "derive": "gauge",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }, {
+        "data_formula": None,
+        "metric_name": "memory`memory`cached",
+        "legend_formula": None,
+        "derive": "gauge",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }, {
+        "data_formula": None,
+        "metric_name": "memory`memory`buffered",
+        "legend_formula": None,
+        "derive": "gauge",
+        "metric_type": "numeric",
+        "alpha": None,
+        "hidden": True,
+        "stack": None,
+        "axis": "l"
+    }]
+}
+
+checks = getChecksByTag(['project:admdsvr', 'wbxdc:sjc02', 'wbxenv:prod'], groupBy='(.+)dmd.+')
+
+# Create cpu charts
+resp = createGraphsWithComposites(cpu_obj, checks)
+for r in resp:
+    print r['title']
+
+# Create memory charts
+resp = createGraphsWithComposites(memory_obj, checks)
+for r in resp:
+    print r['title']
+
+
+print 'Done.'
