@@ -1,0 +1,114 @@
+import urllib.request, json     # to get info from changedashboard api
+from datetime import datetime   # needed as we need to compare the current date with schedule end date
+from datetime import timedelta  # needed as we need find the time difference
+import requests                 # this module needed to post massages to spark space
+import urllib
+import pytz                     # this module needed to convert the time to PT time as all the CD api time is in PT
+import logging                  # For logging
+import os
+
+def allchangestatus ():         # this function is to logg all changes status. Logs in debug mode only.
+    try :
+        i = 0
+        while i < totalWCRs:
+            logger.debug("change:%s, Status:%s, Scd_Endtime:%s, Act_Endtime:%s" % (data["wcr"][i]["changeId"], data["wcr"][i]["status"], data["wcr"][i]["sch_end_date"],data["wcr"][i]["act_end_date"]))
+            i = i + 1
+
+    except Exception as e:
+        logger.error("Error in scanning the changes")
+
+def notifyRoomCDtoSpark(room_id, message):          # this function primary post messages to the space we need.
+    try:
+        payload = {}                        # to pass the roomID and message to the Spark api at once
+        payload.update({'roomId': room_id})
+        payload.update({'markdown': message})
+        r = requests.post(api_message, data=payload, headers=headers)
+        if r.status_code == 200:
+            return True
+        else:
+            return False
+    except Exception as e :
+        logger.error("Error in notifyRoomCDtoSpark")
+def urlextract ():                  # this function is to get the CD api url with last 30 days chnage info.
+    presentdate = datetime.now(pytz.timezone('US/Pacific')).strftime("%Y-%m-%d")
+    presenttime = datetime.now(pytz.timezone('US/Pacific')).strftime("%H:%M:%S")
+    olddatetime = datetime.strptime(prestdatetime, "%Y-%m-%d %H:%M:%S") - timedelta(30)
+    olddate = datetime.strftime(olddatetime, "%Y-%m-%d")
+    oldtime = datetime.strftime(olddatetime, "%H:%M:%S")
+    olddatetimeforurl = olddate + '%20' + oldtime
+    presentdatetimeforurl = presentdate + '%20' + presenttime
+
+    CDurl1 = 'https://cloudservices.webex.com/changedashboard/rest/wcr?start=2017-06-01%2007:00:00&end='
+    CDurl2 = str(presentdatetimeforurl)
+
+    CDurl = str('https://cloudservices.webex.com/changedashboard/rest/wcr?start=' + olddatetimeforurl + '&end=' + presentdatetimeforurl)
+    return CDurl
+
+
+
+
+def changesextended ():         # to find the changes whic is going to extend in 15mins or already passed the extension time by 10 mins
+    try:
+        i = 0
+        while i < totalWCRs:
+            if data["wcr"][i]["status"] in statusneeded:
+                sch_end_date = datetime.strptime(data["wcr"][i]["sch_end_date"], "%Y-%m-%d %H:%M:%S")
+                currentdatetime = datetime.strptime(prestdatetime, "%Y-%m-%d %H:%M:%S")
+                expiretime = int(((sch_end_date - currentdatetime).total_seconds()) / 60)
+                if 0 <= expiretime <= 15:               # to find the changes which are going to extend in next 15mins
+                    notifyRoomCDtoSpark("Y2lzY29zcGFyazovL3VzL1JPT00vMDM5NWRhYzAtNTBkOC0xMWU3LWEyMmMtYjlmNjcxNGMwMTky", "WCR # *%s* Status *%s* Implementer <@personEmail:%s@cisco.com> is about to reach the Scheduled end time *%s* in **%i** minutes" % (data["wcr"][i]["changeId"], data["wcr"][i]["status"], data["wcr"][i]["implementer"], data["wcr"][i]["sch_end_date"], expiretime))
+
+                elif -10 <= expiretime < 0 :            # to find the changes which are already passed the schedule end time by 10mins
+                    notifyRoomCDtoSpark("Y2lzY29zcGFyazovL3VzL1JPT00vMDM5NWRhYzAtNTBkOC0xMWU3LWEyMmMtYjlmNjcxNGMwMTky", "WCR # *%s* Status *%s* Implementer <@personEmail:%s@cisco.com> has exceeded the Scheduled end time *%s* by **%i** minutes" % (data["wcr"][i]["changeId"], data["wcr"][i]["status"], data["wcr"][i]["implementer"], data["wcr"][i]["sch_end_date"], expiretime))
+
+            i = i + 1
+    except Exception as e:
+        logger.error("Error in changesextended")
+
+def changescompleted ():                # to find the changes which crossed shedule end time and got completed in last 11 mins
+    try :
+        i= 0
+
+        while i < totalWCRs:
+            if data["wcr"][i]["act_end_date"] != "":
+                sch_end_date = datetime.strptime(data["wcr"][i]["sch_end_date"], "%Y-%m-%d %H:%M:%S")
+                act_end_date = datetime.strptime(data["wcr"][i]["act_end_date"], "%Y-%m-%d %H:%M:%S")
+                currentdatetime = datetime.strptime(prestdatetime, "%Y-%m-%d %H:%M:%S")
+                if act_end_date > sch_end_date :
+                    extendedtime = int(((act_end_date - sch_end_date).total_seconds())/60)
+                    if int(((currentdatetime - act_end_date).total_seconds())/60) <= 11:
+                        notifyRoomCDtoSpark("Y2lzY29zcGFyazovL3VzL1JPT00vMDM5NWRhYzAtNTBkOC0xMWU3LWEyMmMtYjlmNjcxNGMwMTky", "WCR # *%s* Implementer <@personEmail:%s@cisco.com> which got extended by **%s** minutes is now *%s* " % (data["wcr"][i]["changeId"], data["wcr"][i]["implementer"],extendedtime, data["wcr"][i]["status"]))
+            i = i + 1
+
+    except Exception as e :
+        logger.error("Error in changescompleted")
+
+
+## Actual script starts
+logger = logging.getLogger("CDSparkBot")                # Seeting the logger name as CDSparkBot
+logger.setLevel(logging.DEBUG)                          # logging level
+date_hour = datetime.now(pytz.timezone('US/Pacific')).strftime("%Y-%m-%d@%H")
+logname_date_hours = "cd2sparkbot-" + date_hour + "PT" + ".log"
+fh = logging.FileHandler(logname_date_hours)            # setting the log file name to date-hour. This will create new log file every one hour
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')   # log file format
+fh.setFormatter(formatter)
+logger.addHandler(fh)
+logger.info("Script started execution")                 # to logg the script start
+api_message = "https://api.ciscospark.com/v1/messages"  # Spark api
+token = "YzIyYzllMjItMzE2MS00MDhmLThkYzgtZDkzMmY2Y2YwYTQ1ODI4ZTY5MWEtMTll"      # Bot token to post
+headers = {'user-agent': 'CDtoSpark', 'Authorization': 'Bearer %s' % token}     # Spark api header
+prestdatetime = datetime.now(pytz.timezone('US/Pacific')).strftime("%Y-%m-%d %H:%M:%S")
+url = urlextract()                  # calling the urlextract function to retunr the CDapi url
+#print (url)
+response = urllib.request.urlopen(url).read().decode('utf8') #decoding the cdapi output
+data = json.loads(response)                                  # reading the jason output and storing in dic
+totalWCRs = (len(data["wcr"]))                               # count of total wcr, usefull to parse through all the wcr
+statusneeded = ["In Progress", "PV Passed", "Post Failed", "Failover Submitted", "SV Failed", "SV Success",
+                "Failback Submitted", "SV Submitted", "In Progress", "Failover Success", "Failover Failed",
+                "Failback Success", "Failback Failed", "Pending"]           # change status which we need
+
+allchangestatus()    # calling the allchangestatus function to make a record of all changes
+changesextended()    # calling the changesextended function to find the changes which got extended
+changescompleted()   # calling the changescompleted fuction to find the changes which got completed.
+logger.info("Script completed execution")           # logging with info as the script has ended.
+#notifyRoomCDtoSpark("Y2lzY29zcGFyazovL3VzL1JPT00vMDM5NWRhYzAtNTBkOC0xMWU3LWEyMmMtYjlmNjcxNGMwMTky", "welcome all, i will help you notify if any changes going to reach end time in 15mins and if any changes which got extended the window gets completed")
